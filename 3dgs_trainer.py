@@ -479,20 +479,22 @@ def render_forward(
     px = float(pixel % width) + 0.5
     py = float(pixel // width) + 0.5
     record = batch_view * tiles_x * tiles_y + (pixel // width // tile) * tiles_x + (pixel % width // tile)
-    rgb = wp.vec3(0.0, 0.0, 0.0)
-    transmittance = float(1.0)
+    rgb = wp.vec3(0.0, 0.0, 0.0) # the accumulated color so far
+    transmittance = float(1.0) # the light that is left after going through Gaussians before it
     for entry in range(offsets[record], offsets[record + 1]):
         splat = int(pairs[entry] & wp.uint64(0xFFFFFFFF))
         alpha = alpha_at_pixel(means[splat], log_scales[splat], quaternions[splat],
                                opacity_logits[splat], cameras[view], px, py,
                                float(width), float(height), focal, compact_enabled, compact_beta, compact_alpha_min)
+        # C_new = C_old + T * alpha * c
+        # T_new = T * (1 - alpha)
         if alpha > 0.0:
             colour = colour_at_view(color[splat])
             rgb = rgb + transmittance * alpha * colour
             transmittance = transmittance * (1.0 - alpha)
             if transmittance < TRANSMITTANCE_CUTOFF:
                 break
-    rgb = rgb + transmittance * background
+    rgb = rgb + transmittance * background # the left light is shown as bg
     image[thread] = rgb
     difference = rgb - targets[view * pixels + pixel]
     wp.atomic_add(loss, 0, wp.dot(difference, difference) / float(3 * pixels * view_count))
@@ -584,6 +586,134 @@ def render_backward(
             #
             # remaining_rgb = (final_rgb - prefix_rgb - transmittance * alpha * colour) / wp.max(next_transmittance, 1.0e-8)
 
+            remaining_rgb = (
+                final_rgb
+                - prefix_rgb
+                - transmittance * alpha * colour
+            ) / wp.max(next_transmittance, 1.0e-8)
+
+            colour_adjoint = transmittance * alpha * pixel_grad
+            # colour clamp
+            raw_colour = color[splat]
+
+            if raw_colour[0] <= 0.0 or raw_colour[0] >= 1.0:
+                colour_adjoint[0] = 0.0
+            if raw_colour[1] <= 0.0 or raw_colour[1] >= 1.0:
+                colour_adjoint[1] = 0.0
+            if raw_colour[2] <= 0.0 or raw_colour[2] >= 1.0:
+                colour_adjoint[2] = 0.0
+
+            alpha_adjoint = transmittance * wp.dot(
+                pixel_grad,
+                colour - remaining_rgb,
+            )
+
+            (
+                mean_alpha_grad,
+                log_scale_alpha_grad,
+                quaternion_alpha_grad,
+                opacity_alpha_grad,
+                camera_alpha_grad,
+                px_alpha_grad,
+                py_alpha_grad,
+                width_alpha_grad,
+                height_alpha_grad,
+                focal_alpha_grad,
+                compact_enabled_alpha_grad,
+                compact_beta_alpha_grad,
+                compact_alpha_min_alpha_grad,
+            ) = wp.grad(alpha_at_pixel)(
+                mean,
+                log_scale,
+                quaternion,
+                opacity_logit,
+                camera,
+                px,
+                py,
+                float(width),
+                float(height),
+                focal,
+                compact_enabled,
+                compact_beta,
+                compact_alpha_min,
+            )
+
+            wp.atomic_add(
+                mean_grad_flat,
+                splat * 3 + 0,
+                alpha_adjoint * mean_alpha_grad[0],
+            )
+            wp.atomic_add(
+                mean_grad_flat,
+                splat * 3 + 1,
+                alpha_adjoint * mean_alpha_grad[1],
+            )
+            wp.atomic_add(
+                mean_grad_flat,
+                splat * 3 + 2,
+                alpha_adjoint * mean_alpha_grad[2],
+            )
+
+            wp.atomic_add(
+                scale_grad_flat,
+                splat * 3 + 0,
+                alpha_adjoint * log_scale_alpha_grad[0],
+            )
+            wp.atomic_add(
+                scale_grad_flat,
+                splat * 3 + 1,
+                alpha_adjoint * log_scale_alpha_grad[1],
+            )
+            wp.atomic_add(
+                scale_grad_flat,
+                splat * 3 + 2,
+                alpha_adjoint * log_scale_alpha_grad[2],
+            )
+
+            wp.atomic_add(
+                quaternion_grad_flat,
+                splat * 4 + 0,
+                alpha_adjoint * quaternion_alpha_grad[0],
+            )
+            wp.atomic_add(
+                quaternion_grad_flat,
+                splat * 4 + 1,
+                alpha_adjoint * quaternion_alpha_grad[1],
+            )
+            wp.atomic_add(
+                quaternion_grad_flat,
+                splat * 4 + 2,
+                alpha_adjoint * quaternion_alpha_grad[2],
+            )
+            wp.atomic_add(
+                quaternion_grad_flat,
+                splat * 4 + 3,
+                alpha_adjoint * quaternion_alpha_grad[3],
+            )
+
+            wp.atomic_add(
+                opacity_grad,
+                splat,
+                alpha_adjoint * opacity_alpha_grad,
+            )
+
+            wp.atomic_add(
+                color_grad_flat,
+                splat * 3 + 0,
+                colour_adjoint[0],
+            )
+            wp.atomic_add(
+                color_grad_flat,
+                splat * 3 + 1,
+                colour_adjoint[1],
+            )
+            wp.atomic_add(
+                color_grad_flat,
+                splat * 3 + 2,
+                colour_adjoint[2],
+            )
+            
+
             prefix_rgb = prefix_rgb + transmittance * alpha * colour
             transmittance = next_transmittance
             if transmittance < TRANSMITTANCE_CUTOFF:
@@ -610,7 +740,10 @@ def mse_pixel_gradient(
     batch_view = thread // pixels
     pixel = thread - batch_view * pixels
     target_pixel = view_ids[batch_view] * pixels + pixel
+
+    # L = (1/3*P*V) * sum [(C-C_target)^2]
     difference = image[thread] - target[target_pixel]
+    # d(L) / d(C)
     pixel_gradient[thread] = difference * (2.0 / float(3 * pixels * view_count))
 
 
