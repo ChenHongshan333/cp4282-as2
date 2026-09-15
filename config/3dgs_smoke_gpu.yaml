@@ -8,7 +8,7 @@
 
 paths:
   data: ../data/lego
-  output: ../outputs/smoke.png
+  output: ../outputs/smoke-sparse.png
   init_ply: ../data/lego/init.ply
 
 runtime:
@@ -28,3 +28,7 @@ training:
 densification:
   interval: 100
   fraction: 0.2
+
+sparse:
+  enabled: true
+  samples_per_tile: 256
