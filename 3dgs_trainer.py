@@ -895,6 +895,133 @@ def render_sparse_backward(
             # sampled exactly once, so the sparse loss and every sparse gradient buffer must match
             # the dense ones.
 
+            remaining_rgb = (
+                final_rgb
+                - prefix_rgb
+                - transmittance * alpha * colour
+            ) / wp.max(next_transmittance, 1.0e-8)
+
+            colour_adjoint = transmittance * alpha * pixel_grad
+            # colour clamp
+            raw_colour = color[splat]
+
+            if raw_colour[0] <= 0.0 or raw_colour[0] >= 1.0:
+                colour_adjoint[0] = 0.0
+            if raw_colour[1] <= 0.0 or raw_colour[1] >= 1.0:
+                colour_adjoint[1] = 0.0
+            if raw_colour[2] <= 0.0 or raw_colour[2] >= 1.0:
+                colour_adjoint[2] = 0.0
+
+            alpha_adjoint = transmittance * wp.dot(
+                pixel_grad,
+                colour - remaining_rgb,
+            )
+
+            (
+                mean_alpha_grad,
+                log_scale_alpha_grad,
+                quaternion_alpha_grad,
+                opacity_alpha_grad,
+                camera_alpha_grad,
+                px_alpha_grad,
+                py_alpha_grad,
+                width_alpha_grad,
+                height_alpha_grad,
+                focal_alpha_grad,
+                compact_enabled_alpha_grad,
+                compact_beta_alpha_grad,
+                compact_alpha_min_alpha_grad,
+            ) = wp.grad(alpha_at_pixel)(
+                mean,
+                log_scale,
+                quaternion,
+                opacity_logit,
+                camera,
+                px,
+                py,
+                float(width),
+                float(height),
+                focal,
+                compact_enabled,
+                compact_beta,
+                compact_alpha_min,
+            )
+
+            wp.atomic_add(
+                mean_grad_flat,
+                splat * 3 + 0,
+                alpha_adjoint * mean_alpha_grad[0],
+            )
+            wp.atomic_add(
+                mean_grad_flat,
+                splat * 3 + 1,
+                alpha_adjoint * mean_alpha_grad[1],
+            )
+            wp.atomic_add(
+                mean_grad_flat,
+                splat * 3 + 2,
+                alpha_adjoint * mean_alpha_grad[2],
+            )
+
+            wp.atomic_add(
+                scale_grad_flat,
+                splat * 3 + 0,
+                alpha_adjoint * log_scale_alpha_grad[0],
+            )
+            wp.atomic_add(
+                scale_grad_flat,
+                splat * 3 + 1,
+                alpha_adjoint * log_scale_alpha_grad[1],
+            )
+            wp.atomic_add(
+                scale_grad_flat,
+                splat * 3 + 2,
+                alpha_adjoint * log_scale_alpha_grad[2],
+            )
+
+            wp.atomic_add(
+                quaternion_grad_flat,
+                splat * 4 + 0,
+                alpha_adjoint * quaternion_alpha_grad[0],
+            )
+            wp.atomic_add(
+                quaternion_grad_flat,
+                splat * 4 + 1,
+                alpha_adjoint * quaternion_alpha_grad[1],
+            )
+            wp.atomic_add(
+                quaternion_grad_flat,
+                splat * 4 + 2,
+                alpha_adjoint * quaternion_alpha_grad[2],
+            )
+            wp.atomic_add(
+                quaternion_grad_flat,
+                splat * 4 + 3,
+                alpha_adjoint * quaternion_alpha_grad[3],
+            )
+
+            wp.atomic_add(
+                opacity_grad,
+                splat,
+                alpha_adjoint * opacity_alpha_grad,
+            )
+
+            wp.atomic_add(
+                color_grad_flat,
+                splat * 3 + 0,
+                colour_adjoint[0],
+            )
+            wp.atomic_add(
+                color_grad_flat,
+                splat * 3 + 1,
+                colour_adjoint[1],
+            )
+            wp.atomic_add(
+                color_grad_flat,
+                splat * 3 + 2,
+                colour_adjoint[2],
+            )        
+
             prefix_rgb = prefix_rgb + transmittance * alpha * colour
             transmittance = next_transmittance
 
